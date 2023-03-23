@@ -329,6 +329,20 @@ OBJC_EXTERN void SetHUDEnabled(BOOL isEnabled);
     [self saveUserDefaults];
 }
 
+- (BOOL)keepInPlace
+{
+    [self loadUserDefaults:NO];
+    NSNumber *mode = [_userDefaults objectForKey:@"keepInPlace"];
+    return mode ? [mode boolValue] : NO;
+}
+
+- (void)setKeepInPlace:(BOOL)keepInPlace
+{
+    [self loadUserDefaults:NO];
+    [_userDefaults setObject:@(keepInPlace) forKey:@"keepInPlace"];
+    [self saveUserDefaults];
+}
+
 - (void)reloadMainButtonState
 {
     [UIView transitionWithView:self.view duration:0.25 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{

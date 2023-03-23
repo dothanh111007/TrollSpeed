@@ -784,10 +784,16 @@ static void DumpThreads(void)
     UIVisualEffectView *_blurView;
     UIView *_contentView;
     UILabel *_speedLabel;
+    UIImageView *_lockedView;
     NSTimer *_timer;
     UITapGestureRecognizer *_tapGestureRecognizer;
+    UILongPressGestureRecognizer *_longPressGestureRecognizer;
+    UIImpactFeedbackGenerator *_impactFeedbackGenerator;
+    UINotificationFeedbackGenerator *_notificationFeedbackGenerator;
     BOOL _isFocused;
     UIInterfaceOrientation _orientation;
+    NSLayoutConstraint *_topConstraint;
+    CGFloat _minimumTopConstraintConstant;
 }
 
 - (void)registerNotifications
@@ -846,6 +852,7 @@ static void DumpThreads(void)
     BOOL usesLargeFont = [self usesLargeFont];
 
     _speedLabel.textAlignment = (selectedMode == 1 ? NSTextAlignmentCenter : NSTextAlignmentLeft);
+    _blurView.layer.cornerRadius = (usesLargeFont ? 4.5 : 4.0);
     
     DATAUNIT = usesBitrate;
     SHOW_UPLOAD_SPEED = !singleLineMode;
@@ -862,6 +869,8 @@ static void DumpThreads(void)
     attributedUploadPrefix = nil;
     attributedDownloadPrefix = nil;
 
+    [self removeAllAnimations];
+    [self resetGestureRecognizers];
     [self updateViewConstraints];
     [self onFocus:_contentView];
     [self performSelector:@selector(onBlur:) withObject:_contentView afterDelay:IDLE_INTERVAL];
@@ -911,6 +920,13 @@ static void DumpThreads(void)
 {
     [self loadUserDefaults:NO];
     NSNumber *mode = [_userDefaults objectForKey:@"usesRotation"];
+    return mode ? [mode boolValue] : NO;
+}
+
+- (BOOL)keepInPlace
+{
+    [self loadUserDefaults:NO];
+    NSNumber *mode = [_userDefaults objectForKey:@"keepInPlace"];
     return mode ? [mode boolValue] : NO;
 }
 
@@ -991,6 +1007,7 @@ static inline CGRect orientationBounds(UIInterfaceOrientation orientation, CGRec
                 self->_contentView.alpha = 0.0;
             }];
         }
+        
         return;
     }
 
@@ -1003,7 +1020,8 @@ static inline CGRect orientationBounds(UIInterfaceOrientation orientation, CGRec
     [self.view setHidden:YES];
     [self.view setBounds:bounds];
     
-    [self onBlur:self->_contentView duration:duration];
+    [self resetGestureRecognizers];
+    [self onBlur:_contentView duration:duration];
     
     [UIView animateWithDuration:duration animations:^{
         [self.view setTransform:CGAffineTransformMakeRotation(orientationAngle(orientation))];
@@ -1034,12 +1052,28 @@ static inline CGRect orientationBounds(UIInterfaceOrientation orientation, CGRec
     _speedLabel.textColor = [UIColor whiteColor];
     _speedLabel.font = [UIFont systemFontOfSize:FONT_SIZE];
     _speedLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_speedLabel setContentHuggingPriority:UILayoutPriorityDefaultHigh forAxis:UILayoutConstraintAxisVertical];
     [_blurView.contentView addSubview:_speedLabel];
+
+    _lockedView = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"lock.fill"]];
+    _lockedView.tintColor = [UIColor whiteColor];
+    _lockedView.translatesAutoresizingMaskIntoConstraints = NO;
+    _lockedView.contentMode = UIViewContentModeScaleAspectFit;
+    _lockedView.alpha = 0.0;
+    [_lockedView setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisVertical];
+    [_lockedView setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisVertical];
+    [_blurView.contentView addSubview:_lockedView];
 
     _tapGestureRecognizer = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tapGestureRecognized:)];
     _tapGestureRecognizer.numberOfTapsRequired = 1;
     _tapGestureRecognizer.numberOfTouchesRequired = 1;
     [_contentView addGestureRecognizer:_tapGestureRecognizer];
+
+    _longPressGestureRecognizer = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(longPressGestureRecognized:)];
+    _longPressGestureRecognizer.minimumPressDuration = 0.33;
+    _longPressGestureRecognizer.numberOfTouchesRequired = 1;
+    [_contentView addGestureRecognizer:_longPressGestureRecognizer];
+
     [_contentView setUserInteractionEnabled:YES];
 
     [self reloadUserDefaults];
@@ -1060,6 +1094,8 @@ static inline CGRect orientationBounds(UIInterfaceOrientation orientation, CGRec
 - (void)viewSafeAreaInsetsDidChange
 {
     [super viewSafeAreaInsetsDidChange];
+    [self removeAllAnimations];
+    [self resetGestureRecognizers];
     [self updateViewConstraints];
 }
 
@@ -1074,8 +1110,8 @@ static inline CGRect orientationBounds(UIInterfaceOrientation orientation, CGRec
     if (_orientation == UIInterfaceOrientationLandscapeLeft || _orientation == UIInterfaceOrientationLandscapeRight)
     {
         [_constraints addObjectsFromArray:@[
-            [_contentView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:(layoutGuide.layoutFrame.origin.y > 1) ? 20 : 4],
-            [_contentView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:(layoutGuide.layoutFrame.origin.y > 1) ? -20 : -4],
+            [_contentView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:(CGRectGetMinY(layoutGuide.layoutFrame) > 1) ? 20 : 4],
+            [_contentView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:(CGRectGetMinY(layoutGuide.layoutFrame) > 1) ? -20 : -4],
         ]];
 
         [_constraints addObject:[_contentView.topAnchor constraintEqualToAnchor:self.view.topAnchor constant:(isPad ? 30 : 10)]];
@@ -1087,10 +1123,23 @@ static inline CGRect orientationBounds(UIInterfaceOrientation orientation, CGRec
             [_contentView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         ]];
         
-        if (layoutGuide.layoutFrame.origin.y > 1)
-            [_constraints addObject:[_contentView.topAnchor constraintEqualToAnchor:layoutGuide.topAnchor constant:-10]];
+        if (CGRectGetMinY(layoutGuide.layoutFrame) > 1)
+            _minimumTopConstraintConstant = -10;
         else
-            [_constraints addObject:[_contentView.topAnchor constraintEqualToAnchor:layoutGuide.topAnchor constant:(isPad ? 30 : 20)]];
+            _minimumTopConstraintConstant = (isPad ? 30 : 20);
+        
+        /* Fixed Constraints */
+        [_constraints addObjectsFromArray:@[
+            [_contentView.topAnchor constraintGreaterThanOrEqualToAnchor:layoutGuide.topAnchor constant:_minimumTopConstraintConstant],
+            [_contentView.bottomAnchor constraintLessThanOrEqualToAnchor:layoutGuide.bottomAnchor],
+        ]];
+        
+        /* Flexible Constraint */
+        _topConstraint = [_contentView.topAnchor constraintEqualToAnchor:layoutGuide.topAnchor constant:_minimumTopConstraintConstant];
+        _topConstraint.constant = _minimumTopConstraintConstant;
+        _topConstraint.priority = UILayoutPriorityDefaultHigh;
+
+        [_constraints addObject:_topConstraint];
     }
     
     [_constraints addObjectsFromArray:@[
@@ -1113,16 +1162,22 @@ static inline CGRect orientationBounds(UIInterfaceOrientation orientation, CGRec
         [_blurView.bottomAnchor constraintEqualToAnchor:_speedLabel.bottomAnchor constant:2],
     ]];
 
+    [_constraints addObjectsFromArray:@[
+        [_lockedView.topAnchor constraintGreaterThanOrEqualToAnchor:_blurView.topAnchor constant:2],
+        [_lockedView.centerXAnchor constraintEqualToAnchor:_blurView.centerXAnchor],
+        [_lockedView.centerYAnchor constraintEqualToAnchor:_blurView.centerYAnchor],
+    ]];
+
     [NSLayoutConstraint activateConstraints:_constraints];
     [super updateViewConstraints];
 }
 
 - (void)onFocus:(UIView *)view
 {
-    [self onFocus:view duration:0.2];
+    [self onFocus:view scaleFactor:0.1 duration:0.2 beginFromInitialState:YES blurWhenDone:YES];
 }
 
-- (void)onFocus:(UIView *)view duration:(NSTimeInterval)duration
+- (void)onFocus:(UIView *)view scaleFactor:(CGFloat)scaleFactor duration:(NSTimeInterval)duration beginFromInitialState:(BOOL)beginFromInitialState blurWhenDone:(BOOL)blurWhenDone
 {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(onBlur:) object:view];
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(onFocus:) object:view];
@@ -1132,23 +1187,26 @@ static inline CGRect orientationBounds(UIInterfaceOrientation orientation, CGRec
     [self resetLoopTimer];
 
     NSInteger mode = [self selectedMode];
-    
-    CGFloat scaleFactor = 0.05;
+
     CGFloat topTrans = CGRectGetHeight(view.bounds) * (scaleFactor / 2);
     CGFloat leadingTrans = (mode == 1 ? 0 : (mode == 0 ? CGRectGetWidth(view.bounds) * (scaleFactor / 2) : -CGRectGetWidth(view.bounds) * (scaleFactor / 2)));
 
-    // [view setUserInteractionEnabled:NO];
-    [view setTransform:CGAffineTransformIdentity];
+    if (beginFromInitialState)
+        [view setTransform:CGAffineTransformIdentity];
+    
     [UIView animateWithDuration:duration animations:^{
         if (ABS(leadingTrans) > 1e-6 || ABS(topTrans) > 1e-6)
         {
             CGAffineTransform transform = CGAffineTransformMakeTranslation(leadingTrans, topTrans);
             view.transform = CGAffineTransformScale(transform, 1.0 + scaleFactor, 1.0 + scaleFactor);
         }
-        
+
         view.alpha = 1.0;
     } completion:^(BOOL finished) {
-        [self performSelector:@selector(onBlur:) withObject:view afterDelay:IDLE_INTERVAL];
+        if (blurWhenDone)
+        {
+            [self performSelector:@selector(onBlur:) withObject:view afterDelay:IDLE_INTERVAL];
+        }
     }];
 }
 
@@ -1174,12 +1232,113 @@ static inline CGRect orientationBounds(UIInterfaceOrientation orientation, CGRec
     }];
 }
 
+- (void)removeAllAnimations
+{
+    [_contentView.layer removeAllAnimations];
+}
+
+- (void)resetGestureRecognizers
+{
+    for (UIGestureRecognizer *recognizer in _contentView.gestureRecognizers)
+    {
+        [recognizer setEnabled:NO];
+        [recognizer setEnabled:YES];
+    }
+}
+
 - (void)tapGestureRecognized:(UITapGestureRecognizer *)sender
 {
-#if DEBUG
-    os_log_info(OS_LOG_DEFAULT, "TAPPED");
-#endif
     [self onFocus:sender.view];
+}
+
+- (void)cancelPreviousPerformRequestsWithTarget:(UIView *)view
+{
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(onBlur:) object:view];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(onFocus:) object:view];
+}
+
+- (void)flashLockedViewWithDuration:(NSTimeInterval)duration
+{
+    [_lockedView.layer removeAllAnimations];
+    CABasicAnimation *animation = [CABasicAnimation animationWithKeyPath:@"opacity"];
+    animation.fromValue = [NSNumber numberWithFloat:0.0];
+    animation.toValue = [NSNumber numberWithFloat:1.0];
+    animation.duration = duration;
+    animation.autoreverses = YES;
+    animation.repeatCount = 1;
+    animation.removedOnCompletion = YES;
+    animation.fillMode = kCAFillModeForwards;
+    animation.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [_lockedView.layer addAnimation:animation forKey:@"opacity"];
+
+    [_speedLabel.layer removeAllAnimations];
+    CABasicAnimation *animationReverse = [CABasicAnimation animationWithKeyPath:@"opacity"];
+    animationReverse.fromValue = [NSNumber numberWithFloat:1.0];
+    animationReverse.toValue = [NSNumber numberWithFloat:0.0];
+    animationReverse.duration = duration;
+    animationReverse.autoreverses = YES;
+    animationReverse.repeatCount = 1;
+    animationReverse.removedOnCompletion = YES;
+    animationReverse.fillMode = kCAFillModeForwards;
+    animationReverse.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [_speedLabel.layer addAnimation:animationReverse forKey:@"opacity"];
+}
+
+- (void)longPressGestureRecognized:(UILongPressGestureRecognizer *)sender
+{
+    if (!_isFocused)
+        return;
+    
+    if ([self selectedMode] == 1 || [self keepInPlace])
+    {
+        if (sender.state == UIGestureRecognizerStateBegan)
+            [self cancelPreviousPerformRequestsWithTarget:sender.view];
+        else if (sender.state == UIGestureRecognizerStateFailed || sender.state == UIGestureRecognizerStateEnded || sender.state == UIGestureRecognizerStateCancelled)
+            [self performSelector:@selector(onBlur:) withObject:sender.view afterDelay:IDLE_INTERVAL];
+
+        if (sender.state == UIGestureRecognizerStateBegan)
+        {
+            if (!_notificationFeedbackGenerator)
+                _notificationFeedbackGenerator = [[UINotificationFeedbackGenerator alloc] init];
+            
+            [_notificationFeedbackGenerator prepare];
+            [_notificationFeedbackGenerator notificationOccurred:UINotificationFeedbackTypeWarning];
+
+            [self flashLockedViewWithDuration:0.2];
+        }
+        
+        return;
+    }
+
+    static CGFloat beginOffsetY = 0.0;
+    static CGFloat beginConstantY = 0.0;
+    if (sender.state == UIGestureRecognizerStateBegan)
+    {
+        beginOffsetY = [sender locationInView:sender.view.superview].y;
+        beginConstantY = _topConstraint.constant;
+        [self onFocus:sender.view scaleFactor:0.2 duration:0.1 beginFromInitialState:NO blurWhenDone:NO];
+    }
+    else if (sender.state == UIGestureRecognizerStateChanged)
+    {
+        CGFloat currentOffsetY = [sender locationInView:sender.view.superview].y - beginOffsetY;
+        [_topConstraint setConstant:beginConstantY + currentOffsetY];
+    }
+    else if (sender.state == UIGestureRecognizerStateFailed || sender.state == UIGestureRecognizerStateEnded || sender.state == UIGestureRecognizerStateCancelled)
+    {
+        [self onFocus:sender.view scaleFactor:0.1 duration:0.1 beginFromInitialState:NO blurWhenDone:NO];
+        [self performSelector:@selector(onBlur:) withObject:sender.view afterDelay:IDLE_INTERVAL];
+    }
+
+    if (!_impactFeedbackGenerator)
+    {
+        _impactFeedbackGenerator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    }
+
+    if (sender.state == UIGestureRecognizerStateBegan || sender.state == UIGestureRecognizerStateEnded || sender.state == UIGestureRecognizerStateCancelled)
+    {
+        [_impactFeedbackGenerator prepare];
+        [_impactFeedbackGenerator impactOccurred];
+    }
 }
 
 @end
